@@ -7,7 +7,6 @@ import glob
 import configparser
 import xml.etree.ElementTree as ETree
 from collections import defaultdict
-import asyncio
 import concurrent.futures
 
 def getScriptDirectory() -> str:
@@ -110,14 +109,14 @@ class XPathModifierGUI:
             value=size)
 
 
-    async def start(self):
+    def start(self):
         self.running = True
         savedGameFolder = self.getConfig(name=XPathModifierGUI.CONFIG_OPTION_NAME_GAME_ROOT, defaultValue="")
         if (savedGameFolder):
             self.onSelectGameFolder(savedGameFolder)
-        while self.running:
-            self.root.update()
-            await asyncio.sleep(0)
+        # while self.running:
+        #    self.root.update()
+        self.root.mainloop()
 
 
     def onSelectGameFolder(self, folder) -> None:
@@ -263,15 +262,12 @@ class FileView:
         try:
             xmlParsed = ETree.parse(filePath)
             xmlRoot = xmlParsed.getroot()
-            loop = asyncio.get_event_loop()
-            task = loop.create_task(
-            self._addXmlTag(element=xmlRoot, xPath=f"/{xmlRoot.tag}", rowParent=fileRow, filePath = filePath))
-         
+            self._addXmlTag(element=xmlRoot, xPath=f"/{xmlRoot.tag}", rowParent=fileRow, filePath = filePath)
         except Exception as e:
             return
 
         
-    async def _addXmlTag(self, *, element: ETree.Element, rowParent: str, filePath: str, xPath: str, depth=0, childCounts = None) -> None:
+    def _addXmlTag(self, *, element: ETree.Element, rowParent: str, filePath: str, xPath: str, depth=0, childCounts = None) -> None:
  
         if depth > FileView.MAX_DEPTH_XML_RECURSE:
             return
@@ -286,11 +282,8 @@ class FileView:
         for child in iter(element):
             nextParent = self.tree.insert(rowParent, tkinter.END, tags=(FileView.TAG_TAG_ROW), text=f"<{child.tag}>")
             childXPath = self.buildXPath(parentsXPath=xPath, child=child, childCounts= childCounts)
-            try:
-                await self._addXmlTag(element=child, xPath=childXPath, rowParent=nextParent, filePath=filePath, depth=depth+1, childCounts=childCounts)
-                await asyncio.sleep(0)
-            except asyncio.CancelledError:
-                return
+            self._addXmlTag(element=child, xPath=childXPath, rowParent=nextParent, filePath=filePath, depth=depth+1, childCounts=childCounts)
+            
 
 
     def buildXPath(self,* , parentsXPath, child, childCounts ):
@@ -475,9 +468,9 @@ def isReadableFolder(folderPath) -> bool:
 def isWriteableFolder(folderPath) -> bool:
     return os.path.isdir(folderPath) and os.access(folderPath, os.W_OK)
 
-async def main():
+def main():
     gui = XPathModifierGUI()
-    await gui.start()
+    gui.start()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
