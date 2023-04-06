@@ -9,11 +9,20 @@ import xml.etree.ElementTree as ETree
 from collections import defaultdict
 import asyncio
 import concurrent.futures
+from threading import Thread
+import concurrent.futures
+
+# Separate thread to run parsing if needed
+xmlParseThread = asyncio.new_event_loop()
+def f(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+t = Thread(target=f, args=(xmlParseThread,))
+t.start()
 
 def getScriptDirectory() -> str:
     return os.path.dirname(os.path.abspath(__file__))
-
-
 
 class XPathModifierGUI:
     WINDOW_NAME = "XPath Modifier (7 Days to Die)"
@@ -34,7 +43,7 @@ class XPathModifierGUI:
         
         self.root = tkinter.Tk()
         self.topMenu = TopMenu(root=self.root, 
-                               onSelectConfigFolder=self.onSelectGameFolder, 
+                               onSelectConfigFolder=self.saveGameFolder, 
                                onQuit=self.quit,
                                onSelectOutputFolder=self.onSelectOutputFolder,
                                onWriteChanges=self.onWriteChanges)
@@ -109,24 +118,25 @@ class XPathModifierGUI:
             name=XPathModifierGUI.CONFIG_OPTION_NAME_WINDOWSIZE, 
             value=size)
 
-
-    async def start(self):
+    def initBindings(self) -> None:
+      self.root.bind("<<Saved>>", lambda e: self.updateState())
+        
+    def start(self):
+        self.initBindings()
         self.running = True
         savedGameFolder = self.getConfig(name=XPathModifierGUI.CONFIG_OPTION_NAME_GAME_ROOT, defaultValue="")
         if (savedGameFolder):
-            self.onSelectGameFolder(savedGameFolder)
-        while self.running:
-            self.root.update()
-            await asyncio.sleep(0)
+            self.root.event_generate("<<Saved>>")
+        self.root.mainloop()
 
 
-    def onSelectGameFolder(self, folder) -> None:
+    def updateState(self) -> None:
+        folder = self.getConfig(name=XPathModifierGUI.CONFIG_OPTION_NAME_GAME_ROOT, defaultValue="")
         folder = os.path.abspath(folder)
         if not isReadableFolder(folder):
             tkinter.messagebox.showerror("No read permission",f"You don't have read permissions for \"{folder}\"")
-    
-        self.setGameFolder(folder)
         self.updateTitle(folder)
+        self.fileView.setGameRootFolder(folder)
 
     def onSelectOutputFolder(self, folderStr) -> None:
         if not isWriteableFolder(folderStr):
@@ -140,11 +150,10 @@ class XPathModifierGUI:
     def onWriteChanges(self):
         pass
 
-    def setGameFolder(self, folderStr) -> None:
-        self.fileView.setGameRootFolder(folderStr)
-        self.setConfig(name=XPathModifierGUI.CONFIG_OPTION_NAME_GAME_ROOT,value=folderStr)
-    
-
+    def saveGameFolder(self, folder) -> None:
+        self.setConfig(name=XPathModifierGUI.CONFIG_OPTION_NAME_GAME_ROOT,value=folder)
+        print("Saving!")
+        self.root.event_generate("<<Saved>>")
 
     def loadConfigs(self) -> None:
         configPath = self.getConfigFilePath()
@@ -191,6 +200,14 @@ class XPathModifierGUI:
 
         self.writeConfigs()
         self.running= False
+
+class XmlTagParams:
+  def __init__(self, element: ETree.Element, rowParent: str, filePath: str, xPath: str, childCounts = None):
+    self.element = element
+    self.rowParent = rowParent
+    self.filePath = filePath
+    self.xPath = xPath
+    self.childCounts = childCounts
 
 class FileView:
     #Class variables and functions
@@ -263,34 +280,52 @@ class FileView:
         try:
             xmlParsed = ETree.parse(filePath)
             xmlRoot = xmlParsed.getroot()
-            loop = asyncio.get_event_loop()
-            task = loop.create_task(
-            self._addXmlTag(element=xmlRoot, xPath=f"/{xmlRoot.tag}", rowParent=fileRow, filePath = filePath))
-         
+            # Comment this if you want asynchronous
+            self._addXmlTag(element=xmlRoot, xPath=f"/{xmlRoot.tag}", rowParent=fileRow, filePath = filePath)
+            # Uncomment this if you want asynchronous
+            # future = asyncio.run_coroutine_threadsafe(self._addXmlTagAsync(element=xmlRoot, xPath=f"/{xmlRoot.tag}", rowParent=fileRow, filePath = filePath), xmlParseThread)
         except Exception as e:
             return
 
-        
-    async def _addXmlTag(self, *, element: ETree.Element, rowParent: str, filePath: str, xPath: str, depth=0, childCounts = None) -> None:
- 
-        if depth > FileView.MAX_DEPTH_XML_RECURSE:
-            return
-        childCounts = childCounts or ChildCounts()
-        subFolder = os.path.relpath(os.path.dirname(filePath), start=self.configFolder)
-        self._addModification(treeItemID=rowParent,xmlModification= XmlModification(element= element, xPath=xPath, subFolder=subFolder))
+    def _addXmlTag(self, *, element: ETree.Element, rowParent: str, filePath: str, xPath: str, depth=0, childCounts = None) -> None:
+        stack = []
+        rootParams = XmlTagParams(element, rowParent, filePath, xPath, childCounts)
+        stack.append(rootParams)
+        while(len(stack) > 0):
+            node = stack.pop()
+            _childCounts = node.childCounts or ChildCounts()
+            subFolder = os.path.relpath(os.path.dirname(node.filePath), start=self.configFolder)
+            self._addModification(treeItemID=node.rowParent,xmlModification= XmlModification(element=node.element, xPath=node.xPath, subFolder=subFolder))
 
-        for attributeName, attributeValue in element.attrib.items():
-            attributeListItem = self.tree.insert(rowParent, tkinter.END, tags= (FileView.TAG_ATTRIBUTE_ROW,), text=f"{attributeName}: {attributeValue}")
-            self._addModification(treeItemID=attributeListItem, xmlModification= XmlModification(element=element, xPath= f"{xPath}[@{attributeName}]", subFolder=subFolder))
+            for attributeName, attributeValue in node.element.attrib.items():
+                attributeListItem = self.tree.insert(node.rowParent, tkinter.END, tags= (FileView.TAG_ATTRIBUTE_ROW,), text=f"{attributeName}: {attributeValue}")
+                self._addModification(treeItemID=attributeListItem, xmlModification= XmlModification(element=node.element, xPath= f"{node.xPath}[@{attributeName}]", subFolder=subFolder))
 
-        for child in iter(element):
-            nextParent = self.tree.insert(rowParent, tkinter.END, tags=(FileView.TAG_TAG_ROW), text=f"<{child.tag}>")
-            childXPath = self.buildXPath(parentsXPath=xPath, child=child, childCounts= childCounts)
-            try:
-                await self._addXmlTag(element=child, xPath=childXPath, rowParent=nextParent, filePath=filePath, depth=depth+1, childCounts=childCounts)
-                await asyncio.sleep(0)
-            except asyncio.CancelledError:
-                return
+            for child in iter(node.element):
+                nextParent = self.tree.insert(node.rowParent, tkinter.END, tags=(FileView.TAG_TAG_ROW), text=f"<{child.tag}>")
+                childXPath = self.buildXPath(parentsXPath=node.xPath, child=child, childCounts=_childCounts)
+                childNode = XmlTagParams(element=child, xPath=childXPath, rowParent=nextParent, filePath=filePath, childCounts=_childCounts)
+                stack.append(childNode)
+
+    async def _addXmlTagAsync(self, *, element: ETree.Element, rowParent: str, filePath: str, xPath: str, depth=0, childCounts = None) -> None:
+        stack = []
+        rootParams = XmlTagParams(element, rowParent, filePath, xPath, childCounts)
+        stack.append(rootParams)
+        while(len(stack) > 0):
+            node = stack.pop()
+            _childCounts = node.childCounts or ChildCounts()
+            subFolder = os.path.relpath(os.path.dirname(node.filePath), start=self.configFolder)
+            self._addModification(treeItemID=node.rowParent,xmlModification= XmlModification(element=node.element, xPath=node.xPath, subFolder=subFolder))
+
+            for attributeName, attributeValue in node.element.attrib.items():
+                attributeListItem = self.tree.insert(node.rowParent, tkinter.END, tags= (FileView.TAG_ATTRIBUTE_ROW,), text=f"{attributeName}: {attributeValue}")
+                self._addModification(treeItemID=attributeListItem, xmlModification= XmlModification(element=node.element, xPath= f"{node.xPath}[@{attributeName}]", subFolder=subFolder))
+
+            for child in iter(node.element):
+                nextParent = self.tree.insert(node.rowParent, tkinter.END, tags=(FileView.TAG_TAG_ROW), text=f"<{child.tag}>")
+                childXPath = self.buildXPath(parentsXPath=node.xPath, child=child, childCounts=_childCounts)
+                childNode = XmlTagParams(element=child, xPath=childXPath, rowParent=nextParent, filePath=filePath, childCounts=_childCounts)
+                stack.append(childNode)
 
 
     def buildXPath(self,* , parentsXPath, child, childCounts ):
@@ -475,9 +510,9 @@ def isReadableFolder(folderPath) -> bool:
 def isWriteableFolder(folderPath) -> bool:
     return os.path.isdir(folderPath) and os.access(folderPath, os.W_OK)
 
-async def main():
+def main():
     gui = XPathModifierGUI()
-    await gui.start()
+    gui.start()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
